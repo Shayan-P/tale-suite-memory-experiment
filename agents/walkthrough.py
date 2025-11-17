@@ -24,10 +24,13 @@ class WalkthroughAgent(tales.Agent):
             self.walkthrough = info.get("extra.walkthrough")[::-1]
 
     def act(self, obs, reward, done, info):
+        nb_tokens_obs = self.token_counter(text=obs)
         stats = {
             "prompt": None,
             "response": None,
-            "nb_tokens": self.token_counter(text=obs),
+            "nb_tokens_prompt": nb_tokens_obs,
+            "nb_tokens_response": 0,
+            "nb_tokens": nb_tokens_obs,
         }
 
         if len(self.walkthrough) == 0:
