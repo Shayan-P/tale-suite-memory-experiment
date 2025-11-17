@@ -18,11 +18,22 @@ from tales.utils import (
     merge_messages,
     messages2conversation,
 )
+from dataclasses import dataclass
+import re
+from typing import Optional
+
 
 SYSTEM_PROMPT = (
     "You are playing a text-based game and your goal is to finish it with the highest score."
     " Upon reading the text observation, provide a *single* short phrase to interact with the game, e.g. `get lamp` (without the backticks)."
     " When stuck, try using the `help` command to see what commands are available."
+)
+
+MEMORY_SYSTEMP_PROMPT = SYSTEM_PROMPT + (
+    "In addition to the phrases you use to interact with the game, you can use memory tags to store information about the game or your thoughts for the future."
+    "For example, if you output `get lamp <memory>... summary of what you have learned and plan for the future ...</memory>` you will be able to save this information for yourself (and the content of the memory will not be shown to the environment)."
+    "Every time you use a memory tag, your memory scratchpad will be replaced with the content of the new memory."
+    "The content of the memory will be shown to you at each step of the game."
 )
 
 
@@ -161,6 +172,117 @@ class LLMAgent(tales.Agent):
         return messages
 
 
+class LLMAgentWithMemory(LLMAgent):    
+    @property
+    def uid(self):
+        return (
+            f"LLMAgentWithMemory_{self.llm}"
+            f"_s{self.seed}"
+            f"_c{self.context_limit}"
+            f"_t{self.act_temp}"
+            f"_conv{self.conversation}"
+        )
+
+    @property
+    def params(self):
+        res = super().params
+        res['agent_type'] = 'zero-shot-with-memory'
+        return res
+
+    @staticmethod
+    def extract_memory_from_action(action: str) -> tuple[str, Optional[str]]:
+        """
+        Returns [action without the memory tag, optional memory content]
+        """
+
+        matches = list(re.finditer(r"<memory>(.*?)</memory>", action, re.DOTALL))
+        memory_content = matches[-1].group(1) if matches else None
+        action = re.sub(r"<memory>.*?</memory>", "", action, re.DOTALL).strip()
+        return action, memory_content
+
+    def build_messages(self, observation):
+        messages = [{"role": "system", "content": MEMORY_SYSTEMP_PROMPT}]
+        limit = self.context_limit or len(self.history) + 1
+
+        final_memory_scratchpad: Optional[str] = None
+
+        for i, (obs, action, this_memory_scratchpad) in enumerate(self.history):
+            # extract the memory scratchpad from the action and overwrite the action
+            if this_memory_scratchpad is not None:
+                final_memory_scratchpad = this_memory_scratchpad
+
+            if len(self.history) >= limit and i == 0:
+                # Add the current observation.
+                obs = (
+                    f"// History has been truncated to the last {limit} steps.\n...\n> "
+                )
+
+            if i >= len(self.history) - limit:
+                messages.append({"role": "user", "content": obs})
+                messages.append({"role": "assistant", "content": action})
+
+        if final_memory_scratchpad:
+            messages.append({"role": "user", "content": f"The content of your memory scratchpad is:\n\n{final_memory_scratchpad}\n\nPlease use it to guide your actions. In order to update the memory scratchpad, you can use the <memory>...</memory> tag in your response to **REPLACE** the content of the memory scratchpad."})
+
+        messages.append({"role": "user", "content": observation})
+
+        # Just in case, let's avoid having multiple messages from the same role.
+        messages = merge_messages(messages)
+
+        if not self.conversation:
+            # Merge all messages into a single message except for the system.
+            content = "".join([msg["content"] for msg in messages[1:]])
+            messages = messages[:1] + [{"role": "user", "content": content}]
+
+        if not self.allows_system_prompt:
+            # Make sure the system prompt is added to the following message.
+            messages.pop(0)
+            messages[1]["content"] = f"{SYSTEM_PROMPT}\n\n{messages[1]['content']}"
+
+        return messages
+
+    def act(self, obs, reward, done, infos):
+        messages = self.build_messages(f"{obs}\n> ")
+        llm_kwargs = {
+            "temperature": self.act_temp,
+            "max_tokens": 100,  # Text actions are short phrases.
+            "seed": self.seed,
+            "stream": False,
+        }
+        if self.llm in [
+            "claude-3.5-haiku",
+            "claude-3.5-sonnet",
+            "claude-3.5-sonnet-latest",
+            "claude-3.7-sonnet",
+        ]:
+            # For these models, we cannot set the seed.
+            llm_kwargs.pop("seed")
+
+        if "gemini" in self.llm or "gemma" in self.llm:
+            # For these models, we cannot set the seed and max_tokens has a different name.
+            llm_kwargs.pop("seed")
+            llm_kwargs["max_output_tokens"] = llm_kwargs.pop("max_tokens")
+
+        response = self._llm_call_from_messages(messages, **llm_kwargs)
+
+        # extract the memory scratchpad from the response
+        action, memory_scratchpad = self.extract_memory_from_action(response.text().strip())
+        self.history.append((f"{obs}\n> ", f"{action}\n", memory_scratchpad))
+
+        # Compute usage statistics
+        stats = {
+            "prompt": format_messages_to_markdown(messages),
+            "memory_scratchpad": memory_scratchpad,
+            "response": response.text(),
+            "nb_tokens_prompt": self.token_counter(messages=messages),
+            "nb_tokens_response": self.token_counter(text=response.text()),
+        }
+
+        stats["nb_tokens"] = stats["nb_tokens_prompt"] + stats["nb_tokens_response"]
+
+        return action, stats
+
+
 def build_argparser(parser=None):
     parser = parser or argparse.ArgumentParser()
     group = parser.add_argument_group("LLMAgent settings")
@@ -203,5 +325,14 @@ register(
         "This agent uses a LLM to decide which action to take in a zero-shot manner."
     ),
     klass=LLMAgent,
+    add_arguments=build_argparser,
+)
+
+register(
+    name="zero-shot-with-memory",
+    desc=(
+        "This agent uses a LLM to decide which action to take in a zero-shot manner, but with memory."
+    ),
+    klass=LLMAgentWithMemory,
     add_arguments=build_argparser,
 )

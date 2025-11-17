@@ -148,6 +148,10 @@ def evaluate(agent, env_name, args):
                 f"Score: {info['score']}/{info['max_score']} ({info['score']/info['max_score']:.1%})"
             )
             action, stats = agent.act(obs, score, done, info)
+
+            if 'memory_scratchpad' in stats:
+                log.debug(colored(f"Memory scratchpad: {stats['memory_scratchpad']}", "blue"))
+
             log.debug(colored(f"> {action}", "green"))
 
             if args.debug:
@@ -198,6 +202,7 @@ def evaluate(agent, env_name, args):
                 prev_obs, action, feedback,
                 stats["prompt"], stats["response"], stats.get("thinking"),
                 stats["nb_tokens"], stats["nb_tokens_prompt"], stats["nb_tokens_response"], stats.get("nb_tokens_thinking", 0),
+                stats.get("memory_scratchpad", ""),
             ])
             # fmt: on
 
@@ -262,6 +267,7 @@ def evaluate(agent, env_name, args):
         "Observation", "Action", "Feedback",
         "Prompt", "Response", "Thinking",
         "Token Usage", "Prompt Tokens", "Response Tokens", "Thinking Tokens",
+        "Memory Scratchpad",
     ]
     # fmt: on
     df = pd.DataFrame(results, columns=columns)

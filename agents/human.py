@@ -72,8 +72,11 @@ class HumanAgent(tales.Agent):
         stats = {
             "prompt": format_messages_to_markdown(messages),
             "response": response,
-            "nb_tokens": self.token_counter(messages=messages, text=response),
+            "nb_tokens_prompt": self.token_counter(messages=messages),
+            "nb_tokens_response": self.token_counter(text=response),
         }
+
+        stats["nb_tokens"] = stats["nb_tokens_prompt"] + stats["nb_tokens_response"]
 
         return action, stats
 
